@@ -11,8 +11,7 @@ Make sure you have:
 - A locked profile you want to access
 - A `codes.txt` file containing PINs (`0000–9999`)
 
-#### `You should download the Codes.txt and the Script.txt.`
-
+#### You should download the [Codes.txt](https://github.com/Spikesix/Netflix-Profile-Cracker-Pin-Tester/releases/download/v1.0.25/Codes.txt) and the [Script.txt](https://github.com/Spikesix/Netflix-Profile-Cracker-Pin-Tester/releases/download/v1.0.25/Script.txt).
 
 
 ## Step 1: Log Into Netflix
